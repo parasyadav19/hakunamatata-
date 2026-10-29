@@ -88,11 +88,12 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(auto_export_job, 'cron', hour=10, minute=5)
 scheduler.start()
 
-init_db()
+@app.on_event("startup")
+def startup():
+    init_db()
 
 @app.post("/register")
 async def register(rollno: str = Form(...), name: str = Form(...), role: str = Form(...), branch: str = Form(...), year: str = Form(...), photo: UploadFile = File(...)):
-    # FIX: Already registered check - face save karne se pehle
     conn = get_db()
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
@@ -234,3 +235,8 @@ def summary():
 @app.get("/")
 def root():
     return {"msg": "Smart Attendance Running", "cutoff": "10:00 AM", "auto_excel": "10:05 AM Present + Absent"}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
