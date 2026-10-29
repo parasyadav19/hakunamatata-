@@ -11,3 +11,4 @@ tensorflow
 opencv-python
 numpy
 apscheduler
+werkzeug
