@@ -17,10 +17,8 @@ DB_CONFIG = {
 def get_db():
     return psycopg.connect(**DB_CONFIG)
 
-
 def init_db():
     conn = get_db()
-
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -32,7 +30,6 @@ def init_db():
                     year VARCHAR(20)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS attendance (
                     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -43,79 +40,58 @@ def init_db():
                     UNIQUE (rollno, date)
                 )
             """)
-
+            cur.execute("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;")
+            cur.execute("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;")
+            cur.execute("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS distance_meters DOUBLE PRECISION;")
         conn.commit()
-        print("Tables ready - 1 Day 1 Attendance Locked!")
-
+        print("Tables ready - 1 Day 1 Attendance Locked + Geo Added!")
     finally:
         conn.close()
-
 
 def save_student(rollno, name, role, branch, year):
     conn = get_db()
-
     try:
         with conn.cursor() as cur:
+            # FIX: Pehle check kar already hai kya, warna overwrite ho jayega
+            cur.execute("SELECT rollno FROM students WHERE rollno = %s", (rollno,))
+            if cur.fetchone():
+                return False  # Already exists
+            
             cur.execute("""
                 INSERT INTO students (rollno, name, role, branch, year)
                 VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (rollno)
-                DO UPDATE SET
-                    name = EXCLUDED.name,
-                    role = EXCLUDED.role,
-                    branch = EXCLUDED.branch,
-                    year = EXCLUDED.year
             """, (rollno, name, role, branch, year))
-
         conn.commit()
-
+        return True
     finally:
         conn.close()
 
-
-def get_all_students():
+def mark_attendance_db(rollno, latitude=None, longitude=None, distance=None):
     conn = get_db()
-
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT rollno, name, role, branch, year
-                FROM students
-                ORDER BY rollno
-            """)
+                INSERT INTO attendance (rollno, date, time, status, latitude, longitude, distance_meters)
+                VALUES (%s, CURRENT_DATE, LOCALTIME, 'Present', %s, %s, %s)
+                ON CONFLICT (rollno, date) DO NOTHING RETURNING id
+            """, (rollno, latitude, longitude, distance))
+            saved = cur.fetchone()
+        conn.commit()
+        return True if saved else False
+    finally:
+        conn.close()
 
+def get_todays_attendance_for_excel(target_date):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT a.rollno, s.name, s.branch, s.year, a.date, a.time, a.status, a.latitude, a.longitude, a.distance_meters
+                FROM attendance a JOIN students s ON a.rollno = s.rollno
+                WHERE a.date = %s ORDER BY a.time ASC
+            """, (target_date,))
             columns = [desc.name for desc in cur.description]
             data = [dict(zip(columns, row)) for row in cur.fetchall()]
-
         return data
-
-    finally:
-        conn.close()
-
-
-def mark_attendance_db(rollno):
-    conn = get_db()
-    today = date.today()
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO attendance (rollno, date, time, status)
-                VALUES (%s, CURRENT_DATE, LOCALTIME, 'Present')
-                ON CONFLICT (rollno, date) DO NOTHING
-                RETURNING id
-            """, (rollno,))
-
-            saved = cur.fetchone()
-
-        conn.commit()
-
-        if saved:
-            print(f"SAVED - {rollno} on {today}")
-            return True
-
-        print(f"BLOCKED - Already marked today: {rollno} on {today}")
-        return False
-
     finally:
         conn.close()

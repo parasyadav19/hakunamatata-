@@ -1,6 +1,13 @@
 fastapi
 uvicorn
+psycopg[binary]
+python-dotenv
+python-multipart
+pandas
+openpyxl
 deepface
 tf-keras
-mysql-connector-python
-python-multipart
+tensorflow
+opencv-python
+numpy
+apscheduler
