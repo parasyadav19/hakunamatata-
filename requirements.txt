@@ -13,5 +13,6 @@ numpy==1.26.4
 apscheduler==3.10.4
 werkzeug==3.0.1
 gdown==4.7.1
-google-api-python-client==2.0.2
-google-auth==2.23.0
+google-api-python-client
+google-auth
+google-auth-httplib2
