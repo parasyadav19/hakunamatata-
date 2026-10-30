@@ -77,10 +77,42 @@ def create_absent_excel_for_date(target_date):
     df.to_excel(file_path, index=False)
     return file_path
 
+# ===== AUTO GSHEET SYNC FUNCTION =====
+def do_gsheet_sync():
+    try:
+        creds_json = os.environ.get("GOOGLE_CREDS_JSON") or os.environ.get("GOOGLE_CREDENTIALS")
+        if not creds_json:
+            print("GSHEET: env not set")
+            return False
+        info = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+        service = build("sheets", "v4", credentials=creds)
+        
+        today = date.today()
+        present_data = get_todays_attendance_for_excel(today)
+        
+        values = [["Roll No", "Name", "Branch", "Time", "Date"]]
+        for row in present_data:
+            values.append([row.get('rollno',''), row.get('name',''), row.get('branch',''), str(row.get('time','')), str(today)])
+        
+        service.spreadsheets().values().update(
+            spreadsheetId=SHEET_ID,
+            range="Sheet1!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": values}
+        ).execute()
+        print(f"GSHEET AUTO SYNC OK: {len(present_data)} rows")
+        return True
+    except Exception as e:
+        print(f"GSHEET SYNC FAILED: {e}")
+        return False
+
 def auto_export_job():
     today = date.today()
+    print(f"Running auto export job for {today} at {datetime.now()}")
     create_excel_for_date(today)
     create_absent_excel_for_date(today)
+    do_gsheet_sync()
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(auto_export_job, 'cron', hour=10, minute=5)
@@ -141,10 +173,17 @@ async def mark_attendance(file: UploadFile = File(...), latitude: float = Form(.
     success = mark_attendance_db(rollno, latitude, longitude, distance)
     if not success:
         return {"status": "Already Marked", "rollno": rollno, "name": student['name']}
+    
+    # AUTO SYNC TO GSHEET
+    try:
+        do_gsheet_sync()
+    except Exception as e:
+        print(f"Auto sync error after attendance: {e}")
+
     return {"status": "Present", "rollno": rollno, "name": student['name'], "branch": student['branch'], "distance": f"{int(distance)}m"}
 
 @app.get("/check-distance")
-async def check_distance(latitude: float = Form(...), longitude: float = Form(...)):
+async def check_distance(latitude: float, longitude: float):
     dist = calculate_distance(latitude, longitude, COLLEGE_LAT, COLLEGE_LON)
     return {"distance_meters": int(dist), "inside": dist <= ALLOWED_RADIUS_METERS}
 
@@ -199,33 +238,16 @@ def summary():
 
 @app.get("/sync-gsheet")
 def sync_gsheet():
-    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    if not creds_json:
-        return {"error": "GOOGLE_CREDS_JSON env not set on Render"}
-    info = json.loads(creds_json)
-    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    service = build("sheets", "v4", credentials=creds)
-    
-    today = date.today()
-    present_data = get_todays_attendance_for_excel(today)
-    if not present_data:
-        present_data = []
-
-    values = [["Roll No", "Name", "Branch", "Time", "Date"]]
-    for row in present_data:
-        values.append([row.get('rollno',''), row.get('name',''), row.get('branch',''), str(row.get('time','')), str(today)])
-    
-    service.spreadsheets().values().update(
-        spreadsheetId=SHEET_ID,
-        range="Sheet1!A1",
-        valueInputOption="USER_ENTERED",
-        body={"values": values}
-    ).execute()
-    return {"status": "Sheet Updated", "count": len(present_data)}
+    success = do_gsheet_sync()
+    if success:
+        from db import get_todays_attendance_for_excel as get_data
+        return {"status": "Sheet Updated", "count": len(get_data(date.today()))}
+    else:
+        return {"error": "Sync failed, check Render logs"}
 
 @app.get("/")
 def root():
-    return {"msg": "Smart Attendance Running", "cutoff": "10:00 AM", "auto_excel": "10:05 AM Present + Absent"}
+    return {"msg": "Smart Attendance Running", "cutoff": "10:00 AM", "auto_excel": "10:05 AM Present + Absent + GSheet Auto"}
 
 if __name__ == "__main__":
     import uvicorn
