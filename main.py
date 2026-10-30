@@ -1,14 +1,15 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import shutil, os
+import shutil, os, json, math
 from db import save_student, mark_attendance_db, init_db, get_db, get_todays_attendance_for_excel
 from face_engine import register_face, recognize_face
 import psycopg.rows
 from datetime import datetime, time, date
-import math
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 app = FastAPI()
 
@@ -25,6 +26,8 @@ COLLEGE_LAT = 23.272188
 COLLEGE_LON = 77.447813
 ALLOWED_RADIUS_METERS = 100
 CUTOFF_TIME = time(10, 0, 0)
+SHEET_ID = "1vWAS67vpNvTmG5ilMwrsHW4_eGnCEdH8EhrvmHjZbZ0"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     R = 6371000
@@ -48,13 +51,11 @@ def is_before_cutoff():
 def create_excel_for_date(target_date):
     data = get_todays_attendance_for_excel(target_date)
     if not data:
-        print(f"No attendance for {target_date}, skipping excel")
         return None
     os.makedirs("daily_reports", exist_ok=True)
     df = pd.DataFrame(data)
     file_path = f"daily_reports/attendance_{target_date}.xlsx"
     df.to_excel(file_path, index=False)
-    print(f"✅ PRESENT EXCEL: {file_path} - Count: {len(data)}")
     return file_path
 
 def create_absent_excel_for_date(target_date):
@@ -69,18 +70,15 @@ def create_absent_excel_for_date(target_date):
         conn.close()
     absent = [s for s in all_students if s['rollno'] not in present_rollnos]
     if not absent:
-        print(f"All present on {target_date}, no absent excel")
         return None
     os.makedirs("daily_reports", exist_ok=True)
     df = pd.DataFrame(absent)
     file_path = f"daily_reports/absent_{target_date}.xlsx"
     df.to_excel(file_path, index=False)
-    print(f"✅ ABSENT EXCEL: {file_path} - Count: {len(absent)}")
     return file_path
 
 def auto_export_job():
     today = date.today()
-    print(f"Running auto export job for {today} at {datetime.now()}")
     create_excel_for_date(today)
     create_absent_excel_for_date(today)
 
@@ -103,43 +101,33 @@ async def register(rollno: str = Form(...), name: str = Form(...), role: str = F
                 return {"error": f"Already Registered! {rollno} ({existing['name']}) pehle se registered hai."}
     finally:
         conn.close()
-
     os.makedirs("temp", exist_ok=True)
     path = f"temp/{rollno}.jpg"
     with open(path, "wb") as f:
         shutil.copyfileobj(photo.file, f)
-    
     is_new = save_student(rollno, name, role, branch, year)
     if not is_new:
         return {"error": f"Already Registered! {rollno} pehle se hai."}
-    
     register_face(path, rollno)
     return {"rollno": rollno, "status": "Registered"}
 
 @app.post("/mark-attendance")
 async def mark_attendance(file: UploadFile = File(...), latitude: float = Form(...), longitude: float = Form(...)):
     if latitude == 0 or longitude == 0:
-        return {"status": "Invalid Location", "message": "GPS nahi mila, Location ON karo aur Allow karo"}
-
+        return {"status": "Invalid Location", "message": "GPS nahi mila"}
     before_cutoff, curr_t = is_before_cutoff()
     if not before_cutoff:
         return {"status": "Closed", "message": f"Attendance closed after 10 AM. Time: {curr_t.strftime('%H:%M:%S')}"}
-    
     inside, distance = is_inside_geofence(latitude, longitude)
-    print(f"CHECK -> User: {latitude},{longitude} | Dist: {int(distance)}m")
-    
     if not inside:
-        return {"status": "Out of Range", "message": f"College se bahar ho! Distance: {int(distance)}m. {ALLOWED_RADIUS_METERS}m ke andar aao.", "distance": int(distance)}
-
+        return {"status": "Out of Range", "message": f"Distance: {int(distance)}m", "distance": int(distance)}
     os.makedirs("temp", exist_ok=True)
     path = "temp/check.jpg"
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    
     result = recognize_face(path)
     if not result:
-        return {"error": "Face not recognized - Please register first"}
-    
+        return {"error": "Face not recognized"}
     rollno = result
     conn = get_db()
     try:
@@ -148,27 +136,17 @@ async def mark_attendance(file: UploadFile = File(...), latitude: float = Form(.
             student = cur.fetchone()
     finally:
         conn.close()
-
     if not student:
         return {"error": "Student not in DB"}
-
     success = mark_attendance_db(rollno, latitude, longitude, distance)
     if not success:
-        return {"status": "Already Marked", "rollno": rollno, "name": student['name'], "branch": student['branch'], "message": "Already Marked for Today"}
+        return {"status": "Already Marked", "rollno": rollno, "name": student['name']}
+    return {"status": "Present", "rollno": rollno, "name": student['name'], "branch": student['branch'], "distance": f"{int(distance)}m"}
 
-    return {"status": "Present", "rollno": rollno, "name": student['name'], "branch": student['branch'], "role": student['role'], "distance": f"{int(distance)}m inside campus", "time": str(curr_t)}
-
-@app.post("/check-distance")
+@app.get("/check-distance")
 async def check_distance(latitude: float = Form(...), longitude: float = Form(...)):
     dist = calculate_distance(latitude, longitude, COLLEGE_LAT, COLLEGE_LON)
-    return {
-        "your_lat": latitude,
-        "your_lon": longitude,
-        "college_lat": COLLEGE_LAT,
-        "college_lon": COLLEGE_LON,
-        "distance_meters": int(dist),
-        "inside": dist <= ALLOWED_RADIUS_METERS
-    }
+    return {"distance_meters": int(dist), "inside": dist <= ALLOWED_RADIUS_METERS}
 
 @app.get("/export-excel")
 def export_excel():
@@ -202,20 +180,14 @@ def absent_list():
     finally:
         conn.close()
     absent = [s for s in all_students if s['rollno'] not in present_rollnos]
-    return {
-        "date": str(today),
-        "total": len(all_students),
-        "present": len(present_rollnos),
-        "absent": len(absent),
-        "absent_list": absent
-    }
+    return {"date": str(today), "total": len(all_students), "present": len(present_rollnos), "absent": len(absent), "absent_list": absent}
 
 @app.get("/export-absent-excel")
 def export_absent_excel():
     today = date.today()
     file_path = create_absent_excel_for_date(today)
     if not file_path:
-        return {"message": f"Aaj {today} sab present hain! Koi absent nahi"}
+        return {"message": f"Aaj {today} sab present hain!"}
     return FileResponse(file_path, filename=f"absent_{today}.xlsx")
 
 @app.get("/attendance-summary")
@@ -223,14 +195,33 @@ def summary():
     today = date.today()
     present_data = get_todays_attendance_for_excel(today)
     abs_data = absent_list()
-    return {
-        "date": str(today),
-        "total_students": abs_data['total'],
-        "present": abs_data['present'],
-        "absent": abs_data['absent'],
-        "present_list": present_data,
-        "absent_list": abs_data['absent_list']
-    }
+    return {"date": str(today), "total_students": abs_data['total'], "present": abs_data['present'], "absent": abs_data['absent'], "present_list": present_data, "absent_list": abs_data['absent_list']}
+
+@app.get("/sync-gsheet")
+def sync_gsheet():
+    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
+    if not creds_json:
+        return {"error": "GOOGLE_CREDS_JSON env not set on Render"}
+    info = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    service = build("sheets", "v4", credentials=creds)
+    
+    today = date.today()
+    present_data = get_todays_attendance_for_excel(today)
+    if not present_data:
+        present_data = []
+
+    values = [["Roll No", "Name", "Branch", "Time", "Date"]]
+    for row in present_data:
+        values.append([row.get('rollno',''), row.get('name',''), row.get('branch',''), str(row.get('time','')), str(today)])
+    
+    service.spreadsheets().values().update(
+        spreadsheetId=SHEET_ID,
+        range="Sheet1!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": values}
+    ).execute()
+    return {"status": "Sheet Updated", "count": len(present_data)}
 
 @app.get("/")
 def root():
