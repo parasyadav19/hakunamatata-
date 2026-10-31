@@ -25,7 +25,7 @@ app.add_middleware(
 COLLEGE_LAT = 23.272188
 COLLEGE_LON = 77.447813
 ALLOWED_RADIUS_METERS = 100
-CUTOFF_TIME = time(10, 0, 0)
+CUTOFF_TIME = time(14, 15, 0)
 SHEET_ID = "1vWAS67vpNvTmG5ilMwrsHW4_eGnCEdH8EhrvmHjZbZ0"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
